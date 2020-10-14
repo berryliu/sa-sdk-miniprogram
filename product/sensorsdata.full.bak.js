@@ -11,6 +11,7 @@ sa.para = {
   allow_amend_share_path: true,
   max_string_length: 300,
   datasend_timeout: 3000,
+  source_channel: [],
   autoTrack: {
     appLaunch: true,
     appShow: true,
@@ -19,6 +20,10 @@ sa.para = {
     pageShare: true,
     mpClick: false,
   },
+  is_persistent_save: {
+    share: false,
+    utm: false
+  }
 };
 
 var mpHook = {
@@ -38,21 +43,33 @@ var mpHook = {
 
 var logger = typeof logger === 'object' ? logger : {};
 
-logger.info = function () {
+logger.info = function() {
   if (sa.para.show_log) {
     if (typeof console === 'object' && console.log) {
       try {
         return console.log.apply(console, arguments);
       } catch (e) {
-        console.log(arguments[ 0 ]);
+        console.log(arguments[0]);
       }
     }
   }
 };
 
-sa.setPara = function (para) {
+sa.setPara = function(para) {
 
   sa.para = _.extend2Lev(sa.para, para);
+
+  var channel = [];
+  if (_.isArray(sa.para.source_channel)) {
+    var len = sa.para.source_channel.length;
+    var reserve_channel = ' utm_source utm_medium utm_campaign utm_content utm_term sa_utm ';
+    for (var c = 0; c < len; c++) {
+      if (reserve_channel.indexOf(' ' + sa.para.source_channel[c] + ' ') === -1) {
+        channel.push(sa.para.source_channel[c]);
+      }
+    }
+  }
+  sa.para.source_channel = channel;
 
   if (_.isObject(sa.para.register)) {
     _.extend(_.info.properties, sa.para.register);
@@ -63,18 +80,48 @@ sa.setPara = function (para) {
   }
 
   if (typeof sa.para.send_timeout !== 'number') {
-    sa.para.send_timeout = 0;
+    sa.para.send_timeout = 1000;
   }
 
-  if (para && para.datasend_timeout) {}
+  var batch_send_default = {
+    send_timeout: 6000,
+    max_length: 6
+  };
+
+  if (para && para.datasend_timeout) {} else if (!!sa.para.batch_send) {
+    sa.para.datasend_timeout = 10000;
+  }
+
+  if (sa.para.batch_send === true) {
+    sa.para.batch_send = _.extend({}, batch_send_default);
+    sa.para.use_client_time = true;
+  } else if (_.isObject(sa.para.batch_send)) {
+    sa.para.use_client_time = true;
+    sa.para.batch_send = _.extend({}, batch_send_default, sa.para.batch_send);
+  }
+
+  var is_persistent_save_default = {
+    share: false,
+    utm: false
+  };
+
+  if (sa.para.is_persistent_save === true) {
+    sa.para.is_persistent_save = _.extend({}, is_persistent_save_default);
+    sa.para.is_persistent_save.utm = true;
+  } else if (_.isObject(sa.para.is_persistent_save)) {
+    sa.para.is_persistent_save = _.extend({}, is_persistent_save_default, sa.para.is_persistent_save);
+  }
 
   if (!sa.para.server_url) {
-    logger.info('请使用 setPara() 方法设置 server_url 数据接收地址');
+    logger.info('请使用 setPara() 方法设置 server_url 数据接收地址,详情可查看https://www.sensorsdata.cn/manual/mp_sdk_new.html#112-%E5%BC%95%E5%85%A5%E5%B9%B6%E9%85%8D%E7%BD%AE%E5%8F%82%E6%95%B0');
     return;
   }
 };
 
+
 sa.status = {};
+
+
 
 var ArrayProto = Array.prototype,
   FuncProto = Function.prototype,
@@ -84,6 +131,10 @@ var ArrayProto = Array.prototype,
   hasOwnProperty = ObjProto.hasOwnProperty,
   LIB_VERSION = '1.13.24',
   LIB_NAME = 'MiniProgram';
+
+var source_channel_standard = 'utm_source utm_medium utm_campaign utm_content utm_term';
+var latest_source_channel = ['$latest_utm_source', '$latest_utm_medium', '$latest_utm_campaign', '$latest_utm_content', '$latest_utm_term', 'latest_sa_utm'];
+var latest_share_info = ['$latest_share_distinct_id', '$latest_share_url_path', '$latest_share_depth'];
 
 var mp_scene = {
   1000: '其他',
@@ -174,24 +225,29 @@ var mp_scene = {
   1153: '“识物”结果页打开小程序'
 };
 
+
 var sa_referrer = '直接打开';
 
 sa.status.referrer = '直接打开';
 
 var mpshow_time = null;
 
+var query_share_depth = 0;
+var share_distinct_id = '';
+
 var is_first_launch = false;
 
 sa.lib_version = LIB_VERSION;
 
-(function () {
+
+(function() {
   var nativeBind = FuncProto.bind,
     nativeForEach = ArrayProto.forEach,
     nativeIndexOf = ArrayProto.indexOf,
     nativeIsArray = Array.isArray,
     breaker = {};
 
-  var each = _.each = function (obj, iterator, context) {
+  var each = _.each = function(obj, iterator, context) {
     if (obj == null) {
       return false;
     }
@@ -199,15 +255,15 @@ sa.lib_version = LIB_VERSION;
       obj.forEach(iterator, context);
     } else if (obj.length === +obj.length) {
       for (var i = 0,
-             l = obj.length; i < l; i++) {
-        if (i in obj && iterator.call(context, obj[ i ], i, obj) === breaker) {
+          l = obj.length; i < l; i++) {
+        if (i in obj && iterator.call(context, obj[i], i, obj) === breaker) {
           return false;
         }
       }
     } else {
       for (var key in obj) {
         if (hasOwnProperty.call(obj, key)) {
-          if (iterator.call(context, obj[ key ], key, obj) === breaker) {
+          if (iterator.call(context, obj[key], key, obj) === breaker) {
             return false;
           }
         }
@@ -216,37 +272,37 @@ sa.lib_version = LIB_VERSION;
   };
 
   _.logger = logger;
-  _.extend = function (obj) {
-    each(slice.call(arguments, 1), function (source) {
+  _.extend = function(obj) {
+    each(slice.call(arguments, 1), function(source) {
       for (var prop in source) {
-        if (source[ prop ] !== void 0) {
-          obj[ prop ] = source[ prop ];
+        if (source[prop] !== void 0) {
+          obj[prop] = source[prop];
         }
       }
     });
     return obj;
   };
-  _.extend2Lev = function (obj) {
-    each(slice.call(arguments, 1), function (source) {
+  _.extend2Lev = function(obj) {
+    each(slice.call(arguments, 1), function(source) {
       for (var prop in source) {
-        if (source[ prop ] !== void 0 && source[ prop ] !== null) {
-          if (_.isObject(source[ prop ]) && _.isObject(obj[ prop ])) {
-            _.extend(obj[ prop ], source[ prop ]);
+        if (source[prop] !== void 0 && source[prop] !== null) {
+          if (_.isObject(source[prop]) && _.isObject(obj[prop])) {
+            _.extend(obj[prop], source[prop]);
           } else {
-            obj[ prop ] = source[ prop ];
+            obj[prop] = source[prop];
           }
         }
       }
     });
     return obj;
   };
-  _.coverExtend = function (obj) {
-    each(slice.call(arguments, 1), function (source) {
+  _.coverExtend = function(obj) {
+    each(slice.call(arguments, 1), function(source) {
       for (var prop in source) {
-        if (source[ prop ] !==
-          void 0 && obj[ prop ] ===
+        if (source[prop] !==
+          void 0 && obj[prop] ===
           void 0) {
-          obj[ prop ] = source[ prop ];
+          obj[prop] = source[prop];
         }
       }
     });
@@ -254,11 +310,11 @@ sa.lib_version = LIB_VERSION;
   };
 
   _.isArray = nativeIsArray ||
-    function (obj) {
+    function(obj) {
       return toString.call(obj) === '[object Array]';
     };
 
-  _.isFunction = function (f) {
+  _.isFunction = function(f) {
     try {
       return /^\s*\bfunction\b/.test(f);
     } catch (x) {
@@ -266,11 +322,11 @@ sa.lib_version = LIB_VERSION;
     }
   };
 
-  _.isArguments = function (obj) {
+  _.isArguments = function(obj) {
     return !!(obj && hasOwnProperty.call(obj, 'callee'));
   };
 
-  _.toArray = function (iterable) {
+  _.toArray = function(iterable) {
     if (!iterable) {
       return [];
     }
@@ -286,18 +342,18 @@ sa.lib_version = LIB_VERSION;
     return _.values(iterable);
   };
 
-  _.values = function (obj) {
+  _.values = function(obj) {
     var results = [];
     if (obj == null) {
       return results;
     }
-    each(obj, function (value) {
-      results[ results.length ] = value;
+    each(obj, function(value) {
+      results[results.length] = value;
     });
     return results;
   };
 
-  _.include = function (obj, target) {
+  _.include = function(obj, target) {
     var found = false;
     if (obj == null) {
       return found;
@@ -305,7 +361,7 @@ sa.lib_version = LIB_VERSION;
     if (nativeIndexOf && obj.indexOf === nativeIndexOf) {
       return obj.indexOf(target) != -1;
     }
-    each(obj, function (value) {
+    each(obj, function(value) {
       if (found || (found = (value === target))) {
         return breaker;
       }
@@ -315,11 +371,11 @@ sa.lib_version = LIB_VERSION;
 
 })();
 
-_.trim = function (str) {
+_.trim = function(str) {
   return str.replace(/^[\s\uFEFF\xA0]+|[\s\uFEFF\xA0]+$/g, '');
 };
 
-_.isObject = function (obj) {
+_.isObject = function(obj) {
   if (obj === undefined || obj === null) {
     return false;
   } else {
@@ -327,7 +383,7 @@ _.isObject = function (obj) {
   }
 };
 
-_.isEmptyObject = function (obj) {
+_.isEmptyObject = function(obj) {
   if (_.isObject(obj)) {
     for (var key in obj) {
       if (hasOwnProperty.call(obj, key)) {
@@ -339,28 +395,28 @@ _.isEmptyObject = function (obj) {
   return false;
 };
 
-_.isUndefined = function (obj) {
+_.isUndefined = function(obj) {
   return obj ===
     void 0;
 };
 
-_.isString = function (obj) {
-  return toString.call(obj) === '[object String]';
+_.isString = function(obj) {
+  return toString.call(obj) == '[object String]';
 };
 
-_.isDate = function (obj) {
-  return toString.call(obj) === '[object Date]';
+_.isDate = function(obj) {
+  return toString.call(obj) == '[object Date]';
 };
 
-_.isBoolean = function (obj) {
-  return toString.call(obj) === '[object Boolean]';
+_.isBoolean = function(obj) {
+  return toString.call(obj) == '[object Boolean]';
 };
 
-_.isNumber = function (obj) {
-  return (toString.call(obj) === '[object Number]' && /[\d\.]+/.test(String(obj)));
+_.isNumber = function(obj) {
+  return (toString.call(obj) == '[object Number]' && /[\d\.]+/.test(String(obj)));
 };
 
-_.isJSONString = function (str) {
+_.isJSONString = function(str) {
   try {
     JSON.parse(str);
   } catch (e) {
@@ -368,50 +424,49 @@ _.isJSONString = function (str) {
   }
   return true;
 };
-_.decodeURIComponent = function (val) {
+_.decodeURIComponent = function(val) {
   var result = '';
   try {
     result = decodeURIComponent(val);
   } catch (e) {
     result = val;
-  }
-  ;
+  };
   return result;
 };
 
-_.encodeDates = function (obj) {
-  _.each(obj, function (v, k) {
+_.encodeDates = function(obj) {
+  _.each(obj, function(v, k) {
     if (_.isDate(v)) {
-      obj[ k ] = _.formatDate(v);
+      obj[k] = _.formatDate(v);
     } else if (_.isObject(v)) {
-      obj[ k ] = _.encodeDates(v);
+      obj[k] = _.encodeDates(v);
     }
   });
   return obj;
 };
 
-_.formatDate = function (d) {
-  function pad (n) {
+_.formatDate = function(d) {
+  function pad(n) {
     return n < 10 ? '0' + n : n;
   }
 
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + '.' + pad(d.getMilliseconds());
 };
 
-_.searchObjDate = function (o) {
+_.searchObjDate = function(o) {
   if (_.isObject(o)) {
-    _.each(o, function (a, b) {
+    _.each(o, function(a, b) {
       if (_.isObject(a)) {
-        _.searchObjDate(o[ b ]);
+        _.searchObjDate(o[b]);
       } else {
         if (_.isDate(a)) {
-          o[ b ] = _.formatDate(a);
+          o[b] = _.formatDate(a);
         }
       }
     });
   }
 };
-_.formatString = function (str) {
+_.formatString = function(str) {
   if (str.length > sa.para.max_string_length) {
     logger.info('字符串长度超过限制，已经做截取--' + str);
     return str.slice(0, sa.para.max_string_length);
@@ -420,48 +475,171 @@ _.formatString = function (str) {
   }
 };
 
-_.searchObjString = function (o) {
+_.searchObjString = function(o) {
   if (_.isObject(o)) {
-    _.each(o, function (a, b) {
+    _.each(o, function(a, b) {
       if (_.isObject(a)) {
-        _.searchObjString(o[ b ]);
+        _.searchObjString(o[b]);
       } else {
         if (_.isString(a)) {
-          o[ b ] = _.formatString(a);
+          o[b] = _.formatString(a);
         }
       }
     });
   }
 };
 
-_.unique = function (ar) {
+_.unique = function(ar) {
   var temp,
     n = [],
     o = {};
   for (var i = 0; i < ar.length; i++) {
-    temp = ar[ i ];
+    temp = ar[i];
     if (!(temp in o)) {
-      o[ temp ] = true;
+      o[temp] = true;
       n.push(temp);
     }
   }
   return n;
 };
 
-_.getCurrentPath = function () {
+_.strip_sa_properties = function(p) {
+  if (!_.isObject(p)) {
+    return p;
+  }
+  _.each(p, function(v, k) {
+    if (_.isArray(v)) {
+      var temp = [];
+      _.each(v, function(arrv) {
+        if (_.isString(arrv)) {
+          temp.push(arrv);
+        } else {
+          logger.info('您的数据-', v, '的数组里的值必须是字符串,已经将其删除');
+        }
+      });
+      if (temp.length !== 0) {
+        p[k] = temp;
+      } else {
+        delete p[k];
+        logger.info('已经删除空的数组');
+      }
+    }
+    if (!(_.isString(v) || _.isNumber(v) || _.isDate(v) || _.isBoolean(v) || _.isArray(v))) {
+      logger.info('您的数据-', v, '-格式不满足要求，我们已经将其删除');
+      delete p[k];
+    }
+  });
+  return p;
+};
+
+_.strip_empty_properties = function(p) {
+  var ret = {};
+  _.each(p, function(v, k) {
+    if (v != null) {
+      ret[k] = v;
+    }
+  });
+  return ret;
+};
+
+_.utf8Encode = function(string) {
+  string = (string + '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  var utftext = '',
+    start,
+    end;
+  var stringl = 0,
+    n;
+
+  start = end = 0;
+  stringl = string.length;
+
+  for (n = 0; n < stringl; n++) {
+    var c1 = string.charCodeAt(n);
+    var enc = null;
+
+    if (c1 < 128) {
+      end++;
+    } else if ((c1 > 127) && (c1 < 2048)) {
+      enc = String.fromCharCode((c1 >> 6) | 192, (c1 & 63) | 128);
+    } else {
+      enc = String.fromCharCode((c1 >> 12) | 224, ((c1 >> 6) & 63) | 128, (c1 & 63) | 128);
+    }
+    if (enc !== null) {
+      if (end > start) {
+        utftext += string.substring(start, end);
+      }
+      utftext += enc;
+      start = end = n + 1;
+    }
+  }
+
+  if (end > start) {
+    utftext += string.substring(start, string.length);
+  }
+
+  return utftext;
+};
+
+_.base64Encode = function(data) {
+  var b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+  var o1,
+    o2,
+    o3,
+    h1,
+    h2,
+    h3,
+    h4,
+    bits,
+    i = 0,
+    ac = 0,
+    enc = '',
+    tmp_arr = [];
+  if (!data) {
+    return data;
+  }
+  data = _.utf8Encode(data);
+  do {
+    o1 = data.charCodeAt(i++);
+    o2 = data.charCodeAt(i++);
+    o3 = data.charCodeAt(i++);
+
+    bits = o1 << 16 | o2 << 8 | o3;
+
+    h1 = bits >> 18 & 0x3f;
+    h2 = bits >> 12 & 0x3f;
+    h3 = bits >> 6 & 0x3f;
+    h4 = bits & 0x3f;
+    tmp_arr[ac++] = b64.charAt(h1) + b64.charAt(h2) + b64.charAt(h3) + b64.charAt(h4);
+  } while (i < data.length);
+
+  enc = tmp_arr.join('');
+
+  switch (data.length % 3) {
+    case 1:
+      enc = enc.slice(0, -2) + '==';
+      break;
+    case 2:
+      enc = enc.slice(0, -1) + '=';
+      break;
+  }
+
+  return enc;
+};
+
+_.getCurrentPath = function() {
   var url = '未取到';
   try {
     var pages = getCurrentPages();
-    var currentPage = pages[ pages.length - 1 ];
+    var currentPage = pages[pages.length - 1];
     url = currentPage.route;
   } catch (e) {
     logger.info(e);
-  }
-  ;
+  };
   return url;
 };
 
-_.getCurrentUrl = function (me) {
+_.getCurrentUrl = function(me) {
   var path = _.getCurrentPath();
   var query = '';
   if (_.isObject(me) && me.sensors_mp_encode_url_query) {
@@ -474,7 +652,7 @@ _.getCurrentUrl = function (me) {
   }
 };
 
-_.getPath = function (path) {
+_.getPath = function(path) {
   if (typeof path === 'string') {
     path = path.replace(/^\//, '');
   } else {
@@ -483,23 +661,23 @@ _.getPath = function (path) {
   return path;
 };
 
-_.getMethods = function (option) {
+_.getMethods = function(option) {
   var methods = [];
   for (var m in option) {
-    if (typeof (option[ m ]) === 'function' && !mpHook[ m ]) {
+    if (typeof(option[m]) === 'function' && !mpHook[m]) {
       methods.push(m);
     }
   }
   return methods;
 }
 
-_.isClick = function (type) {
+_.isClick = function(type) {
   var mpTaps = {
     "tap": 1,
     "longpress": 1,
     "longtap": 1,
   };
-  return !!mpTaps[ type ];
+  return !!mpTaps[type];
 }
 
 sa.initialState = {
@@ -507,12 +685,12 @@ sa.initialState = {
   isComplete: false,
   systemIsComplete: false,
   storeIsComplete: false,
-  checkIsComplete: function () {
+  checkIsComplete: function() {
     if (this.systemIsComplete && this.storeIsComplete) {
       this.isComplete = true;
       if (this.queue.length > 0) {
-        _.each(this.queue, function (content) {
-          sa[ content[ 0 ] ].apply(sa, slice.call(content[ 1 ]));
+        _.each(this.queue, function(content) {
+          sa[content[0]].apply(sa, slice.call(content[1]));
         });
         this.queue = [];
       }
@@ -520,15 +698,45 @@ sa.initialState = {
   }
 };
 
-_.getObjFromQuery = function (str) {
+
+_.getCustomUtmFromQuery = function(query, utm_prefix, source_channel_prefix, sautm_prefix) {
+  if (!_.isObject(query)) {
+    return {};
+  }
+  var result = {};
+  if (query['sa_utm']) {
+    for (var i in query) {
+      if (i === 'sa_utm') {
+        result[sautm_prefix + i] = query[i];
+        continue;
+      }
+      if (_.include(sa.para.source_channel, i)) {
+        result[source_channel_prefix + i] = query[i];
+      }
+    }
+  } else {
+    for (var i in query) {
+      if ((' ' + source_channel_standard + ' ').indexOf(' ' + i + ' ') !== -1) {
+        result[utm_prefix + i] = query[i];
+        continue;
+      }
+      if (_.include(sa.para.source_channel, i)) {
+        result[source_channel_prefix + i] = query[i];
+      }
+    }
+  }
+  return result;
+};
+
+_.getObjFromQuery = function(str) {
   var query = str.split('?');
   var arr = [];
   var obj = {};
-  if (query && query[ 1 ]) {
-    _.each(query[ 1 ].split('&'), function (value) {
+  if (query && query[1]) {
+    _.each(query[1].split('&'), function(value) {
       arr = value.split('=');
-      if (arr[ 0 ] && arr[ 1 ]) {
-        obj[ arr[ 0 ] ] = arr[ 1 ];
+      if (arr[0] && arr[1]) {
+        obj[arr[0]] = arr[1];
       }
     });
   } else {
@@ -537,8 +745,8 @@ _.getObjFromQuery = function (str) {
   return obj;
 };
 
-_.setStorageSync = function (key, value) {
-  var fn = function () {
+_.setStorageSync = function(key, value) {
+  var fn = function() {
     wx.setStorageSync(key, value);
   };
   try {
@@ -553,7 +761,7 @@ _.setStorageSync = function (key, value) {
   }
 };
 
-_.getStorageSync = function (key) {
+_.getStorageSync = function(key) {
   var store = '';
   try {
     store = wx.getStorageSync(key);
@@ -567,32 +775,152 @@ _.getStorageSync = function (key) {
   return store;
 };
 
-_.getMPScene = function (key) {
+_.getMPScene = function(key) {
   if (typeof key === "number" || (typeof key === "string" && key !== "")) {
     key = String(key);
-    return mp_scene[ key ] || key;
+    return mp_scene[key] || key;
   } else {
     return "未取到值";
   }
 };
 
-_.getShareInfo = function () {
+_.setShareInfo = function(para, prop) {
+  var share = {};
+  var obj = {};
+  var current_id = sa.store.getDistinctId();
+  var current_first_id = sa.store.getFirstId();
+  if (para && _.isObject(para.query) && para.query.sampshare) {
+    share = _.decodeURIComponent(para.query.sampshare);
+    if (_.isJSONString(share)) {
+      share = JSON.parse(share);
+    } else {
+      return {};
+    }
+  } else {
+    return {};
+  }
+  var depth = share.d;
+  var path = share.p;
+  var id = share.i;
+  if (typeof id === 'string') {
+    prop.$share_distinct_id = id;
+    share_distinct_id = id;
+    obj.$latest_share_distinct_id = id;
+  } else {
+    prop.$share_distinct_id = '取值异常';
+  }
+
+
+  if (typeof depth === 'number') {
+    if (share_distinct_id && (share_distinct_id === current_id || share_distinct_id === current_first_id)) {
+      prop.$share_depth = depth;
+      query_share_depth = depth;
+      obj.$latest_share_depth = depth;
+    } else if (share_distinct_id && (share_distinct_id !== current_id || share_distinct_id !== current_first_id)) {
+      prop.$share_depth = depth + 1;
+      query_share_depth = depth + 1;
+      obj.$latest_share_depth = depth + 1;
+    } else {
+      prop.$share_depth = '-1';
+    }
+  } else {
+    prop.$share_depth = '-1';
+  }
+  if (typeof path === 'string') {
+    prop.$share_url_path = path;
+    obj.$latest_share_url_path = path;
+  } else {
+    prop.$share_url_path = '取值异常';
+  }
+  _.setLatestShare(obj);
+};
+
+_.getShareInfo = function() {
   return JSON.stringify({
     i: sa.store.getDistinctId() || '取值异常',
     p: _.getCurrentPath(),
+    d: query_share_depth
   });
 };
 
-_.wxrequest = function (obj) {
+_.detectOptionQuery = function(para) {
+  if (!para || !_.isObject(para.query)) {
+    return {};
+  }
+  var result = {};
+  result.query = _.extend({}, para.query);
+  if (typeof result.query.scene === 'string' && isBScene(result.query)) {
+    result.scene = result.query.scene;
+    delete result.query.scene;
+  }
+  if (para.query.q && para.query.scancode_time && String(para.scene).slice(0, 3) === '101') {
+    result.q = String(result.query.q);
+    delete result.query.q;
+    delete result.query.scancode_time;
+  }
+
+  function isBScene(obj) {
+    var source = ['utm_source', 'utm_content', 'utm_medium', 'utm_campaign', 'utm_term', 'sa_utm'];
+    var source_keyword = source.concat(sa.para.source_channel);
+    var reg = new RegExp('(' + source_keyword.join('|') + ')%3D', 'i');
+    var keys = Object.keys(obj);
+    if (keys.length === 1 && keys[0] === 'scene' && reg.test(obj.scene)) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  return result;
+};
+
+_.getMixedQuery = function(para) {
+  var obj = _.detectOptionQuery(para);
+  var scene = obj.scene;
+  var q = obj.q;
+  var query = obj.query;
+  for (var i in query) {
+    query[i] = _.decodeURIComponent(query[i]);
+  }
+  if (scene) {
+    scene = _.decodeURIComponent(scene);
+    if (scene.indexOf("?") !== -1) {
+      scene = '?' + scene.replace(/\?/g, '');
+    } else {
+      scene = '?' + scene;
+    }
+    _.extend(query, _.getObjFromQuery(scene));
+  }
+
+  if (q) {
+    _.extend(query, _.getObjFromQuery(_.decodeURIComponent(q)));
+  }
+
+
+  return query;
+};
+
+_.setUtm = function(para, prop) {
+  var utms = {};
+  var query = _.getMixedQuery(para);
+  var pre1 = _.getCustomUtmFromQuery(query, '$', '_', '$');
+  var pre2 = _.getCustomUtmFromQuery(query, '$latest_', '_latest_', '$latest_');
+  utms.pre1 = pre1;
+  utms.pre2 = pre2;
+  _.extend(prop, pre1);
+  return utms;
+};
+
+_.wxrequest = function(obj) {
   var rq = wx.request(obj);
-  setTimeout(function () {
+  setTimeout(function() {
     if (_.isObject(rq) && _.isFunction(rq.abort)) {
       rq.abort();
     }
   }, sa.para.datasend_timeout);
 };
 
-_.getAppId = function () {
+_.getAppId = function() {
   var info;
   if (wx.getAccountInfoSync) {
     info = wx.getAccountInfoSync();
@@ -602,26 +930,27 @@ _.getAppId = function () {
   }
 };
 
+
 _.info = {
   currentProps: {},
   properties: {
     $lib: LIB_NAME,
     $lib_version: String(LIB_VERSION)
   },
-  getSystem: function () {
+  getSystem: function() {
     var e = this.properties;
     var that = this;
 
-    function getNetwork () {
+    function getNetwork() {
       wx.getNetworkType({
-        "success": function (t) {
-          e.$network_type = t[ "networkType" ]
+        "success": function(t) {
+          e.$network_type = t["networkType"]
         },
         "complete": getSystemInfo
       })
     }
 
-    function formatSystem (system) {
+    function formatSystem(system) {
       var _system = system.toLowerCase();
       if (_system === 'ios') {
         return 'iOS';
@@ -632,17 +961,17 @@ _.info = {
       }
     }
 
-    function getSystemInfo () {
+    function getSystemInfo() {
       wx.getSystemInfo({
-        "success": function (t) {
-          e.$manufacturer = t[ "brand" ];
-          e.$model = t[ "model" ];
-          e.$screen_width = Number(t[ "screenWidth" ]);
-          e.$screen_height = Number(t[ "screenHeight" ]);
-          e.$os = formatSystem(t[ "platform" ]);
-          e.$os_version = t[ "system" ].indexOf(' ') > -1 ? t[ "system" ].split(' ')[ 1 ] : t[ "system" ];
+        "success": function(t) {
+          e.$manufacturer = t["brand"];
+          e.$model = t["model"];
+          e.$screen_width = Number(t["screenWidth"]);
+          e.$screen_height = Number(t["screenHeight"]);
+          e.$os = formatSystem(t["platform"]);
+          e.$os_version = t["system"].indexOf(' ') > -1 ? t["system"].split(' ')[1] : t["system"];
         },
-        "complete": function () {
+        "complete": function() {
           var timeZoneOffset = new Date().getTimezoneOffset();
           var appId = _.getAppId();
           if (_.isNumber(timeZoneOffset)) {
@@ -663,7 +992,9 @@ _.info = {
 
 sa._ = _;
 
-sa.prepareData = function (p, callback) {
+
+
+sa.prepareData = function(p, callback) {
 
   var data = {
     distinct_id: this.store.getDistinctId(),
@@ -682,6 +1013,9 @@ sa.prepareData = function (p, callback) {
   }
 
   if (!p.type || p.type.slice(0, 7) !== 'profile') {
+    if (sa.para.batch_send) {
+      data._track_id = Number(String(Math.random()).slice(2, 5) + String(Math.random()).slice(2, 4) + String(Date.now()).slice(-4));
+    }
     data.properties = _.extend({}, _.info.properties, sa.store.getProps(), _.info.currentProps, data.properties);
 
     if (typeof sa.store._state === 'object' && typeof sa.store._state.first_visit_day_time === 'number' && sa.store._state.first_visit_day_time > (new Date()).getTime()) {
@@ -699,6 +1033,7 @@ sa.prepareData = function (p, callback) {
     }
   }
 
+
   _.searchObjDate(data);
   _.searchObjString(data);
 
@@ -708,7 +1043,7 @@ sa.prepareData = function (p, callback) {
 };
 
 sa.store = {
-  verifyDistinctId: function (id) {
+  verifyDistinctId: function(id) {
     if (typeof id === 'number') {
       id = String(id);
       if (!/^\d+$/.test(id)) {
@@ -721,11 +1056,11 @@ sa.store = {
     return id;
   },
   storageInfo: null,
-  getUUID: function () {
+  getUUID: function() {
     return "" + Date.now() + '-' + Math.floor(1e7 * Math.random()) + '-' + Math.random().toString(16).replace('.', '') + '-' + String(Math.random() * 31242).replace('.', '').slice(0, 8);
 
   },
-  getStorage: function () {
+  getStorage: function() {
     if (this.storageInfo) {
       return this.storageInfo;
     } else {
@@ -736,17 +1071,17 @@ sa.store = {
   _state: {},
   mem: {
     mdata: [],
-    getLength: function () {
+    getLength: function() {
       return this.mdata.length;
     },
-    add: function (data) {
+    add: function(data) {
       this.mdata.push(data);
     },
-    clear: function (len) {
+    clear: function(len) {
       this.mdata.splice(0, len);
     }
   },
-  toState: function (ds) {
+  toState: function(ds) {
     var state = null;
     if (_.isJSONString(ds)) {
       state = JSON.parse(ds);
@@ -766,28 +1101,28 @@ sa.store = {
       this.set('distinct_id', this.getUUID());
     }
   },
-  getFirstId: function () {
+  getFirstId: function() {
     return this._state._first_id || this._state.first_id;
   },
-  getDistinctId: function () {
+  getDistinctId: function() {
     return this._state._distinct_id || this._state.distinct_id;
   },
-  getUnionId: function () {
+  getUnionId: function() {
     var obj = {};
     var first_id = this._state._first_id || this._state.first_id;
     var distinct_id = this._state._distinct_id || this._state.distinct_id;
     if (first_id && distinct_id) {
-      obj[ 'login_id' ] = distinct_id;
-      obj[ 'anonymous_id' ] = first_id;
+      obj['login_id'] = distinct_id;
+      obj['anonymous_id'] = first_id;
     } else {
-      obj[ 'anonymous_id' ] = distinct_id;
+      obj['anonymous_id'] = distinct_id;
     }
     return obj;
   },
-  getProps: function () {
+  getProps: function() {
     return this._state.props || {};
   },
-  setProps: function (newp, isCover) {
+  setProps: function(newp, isCover) {
     var props = this._state.props || {};
     if (!isCover) {
       _.extend(props, newp);
@@ -796,16 +1131,16 @@ sa.store = {
       this.set('props', newp);
     }
   },
-  set: function (name, value) {
+  set: function(name, value) {
     var obj = {};
     if (typeof name === 'string') {
-      obj[ name ] = value;
+      obj[name] = value;
     } else if (typeof name === 'object') {
       obj = name;
     }
     this._state = this._state || {};
     for (var i in obj) {
-      this._state[ i ] = obj[ i ];
+      this._state[i] = obj[i];
       if (i === 'first_id') {
         delete this._state._first_id;
       } else if (i === 'distinct_id') {
@@ -814,16 +1149,16 @@ sa.store = {
     }
     this.save();
   },
-  change: function (name, value) {
-    this._state[ '_' + name ] = value;
+  change: function(name, value) {
+    this._state['_' + name] = value;
   },
-  save: function () {
+  save: function() {
     var copyState = JSON.parse(JSON.stringify(this._state));
     delete copyState._first_id;
     delete copyState._distinct_id;
     sa._.setStorageSync("sensorsdata2015_wechat", copyState);
   },
-  init: function () {
+  init: function() {
     var info = this.getStorage();
     if (info) {
       this.toState(info);
@@ -846,31 +1181,31 @@ sa.store = {
   }
 };
 
-sa.setProfile = function (p, c) {
+sa.setProfile = function(p, c) {
   sa.prepareData({
     type: 'profile_set',
     properties: p
   }, c);
 };
 
-sa.setOnceProfile = function (p, c) {
+sa.setOnceProfile = function(p, c) {
   sa.prepareData({
     type: 'profile_set_once',
     properties: p
   }, c);
 };
 
-sa.appendProfile = function (p, c) {
+sa.appendProfile = function(p, c) {
   if (!_.isObject(p)) {
     return false;
   }
-  _.each(p, function (value, key) {
+  _.each(p, function(value, key) {
     if (_.isString(value)) {
-      p[ key ] = [value];
+      p[key] = [value];
     } else if (_.isArray(value)) {
 
     } else {
-      delete p[ key ];
+      delete p[key];
       logger.info('appendProfile属性的值必须是字符串或者数组');
     }
   });
@@ -880,14 +1215,14 @@ sa.appendProfile = function (p, c) {
   }, c);
 };
 
-sa.incrementProfile = function (p, c) {
+sa.incrementProfile = function(p, c) {
   if (!_.isObject(p)) {
     return false;
   }
   var str = p;
   if (_.isString(p)) {
     p = {}
-    p[ str ] = 1;
+    p[str] = 1;
   }
   sa.prepareData({
     type: 'profile_increment',
@@ -895,7 +1230,7 @@ sa.incrementProfile = function (p, c) {
   }, c);
 };
 
-sa.track = function (e, p, c) {
+sa.track = function(e, p, c) {
   this.prepareData({
     type: 'track',
     event: e,
@@ -903,7 +1238,7 @@ sa.track = function (e, p, c) {
   }, c);
 };
 
-sa.identify = function (id, isSave) {
+sa.identify = function(id, isSave) {
   if (typeof id !== 'string' && typeof id !== 'number') {
     return false;
   }
@@ -924,7 +1259,7 @@ sa.identify = function (id, isSave) {
   }
 };
 
-sa.trackSignup = function (id, e, p, c) {
+sa.trackSignup = function(id, e, p, c) {
   var original_id = sa.store.getFirstId() || sa.store.getDistinctId();
   sa.store.set('distinct_id', id);
   sa.prepareData({
@@ -936,46 +1271,76 @@ sa.trackSignup = function (id, e, p, c) {
   }, c);
 };
 
-sa.registerApp = function (obj) {
+
+sa.registerApp = function(obj) {
   if (_.isObject(obj) && !_.isEmptyObject(obj)) {
     _.info.currentProps = _.extend(_.info.currentProps, obj);
   }
 };
 
-sa.register = function (obj) {
+sa.register = function(obj) {
   if (_.isObject(obj) && !_.isEmptyObject(obj)) {
     sa.store.setProps(obj);
   }
 };
 
-sa.clearAllRegister = function () {
+sa.clearAllRegister = function() {
   sa.store.setProps({}, true);
 };
 
-sa.clearAllProps = function (arr) {
+sa.clearAllProps = function(arr) {
   var obj = sa.store.getProps();
   var props = {};
   if (_.isArray(arr)) {
-    _.each(obj, function (value, key) {
+    _.each(obj, function(value, key) {
       if (!_.include(arr, key)) {
-        props[ key ] = value;
+        props[key] = value;
       }
     });
     sa.store.setProps(props, true);
   }
 };
 
-sa.clearAppRegister = function (arr) {
+sa.clearAppRegister = function(arr) {
   if (_.isArray(arr)) {
-    _.each(_.info.currentProps, function (value, key) {
+    _.each(_.info.currentProps, function(value, key) {
       if (_.include(arr, key)) {
-        delete _.info.currentProps[ key ];
+        delete _.info.currentProps[key];
       }
     });
   }
 };
 
-sa.login = function (id) {
+_.setLatestChannel = function(channel) {
+  if (!_.isEmptyObject(channel)) {
+    if (includeChannel(channel, latest_source_channel)) {
+      sa.clearAppRegister(latest_source_channel);
+      sa.clearAllProps(latest_source_channel);
+    }
+    sa.para.is_persistent_save.utm ? sa.register(channel) : sa.registerApp(channel);
+  }
+
+  function includeChannel(channel, arr) {
+    var found = false;
+    for (var i in arr) {
+      if (channel[arr[i]]) {
+        found = true;
+      }
+    }
+    return found;
+  }
+};
+
+_.setLatestShare = function(share) {
+  if (share.$latest_share_depth || share.$latest_share_distinct_id || share.$latest_share_url_path) {
+    sa.clearAppRegister(latest_share_info);
+    sa.clearAllProps(latest_share_info);
+
+    sa.para.is_persistent_save.share ? sa.register(share) : sa.registerApp(share);
+  }
+};
+
+sa.login = function(id) {
   if (typeof id !== 'string' && typeof id !== 'number') {
     return false;
   }
@@ -992,7 +1357,7 @@ sa.login = function (id) {
   }
 };
 
-sa.logout = function (isChangeId) {
+sa.logout = function(isChangeId) {
   var firstId = sa.store.getFirstId();
   if (firstId) {
     sa.store.set('first_id', '');
@@ -1007,14 +1372,14 @@ sa.logout = function (isChangeId) {
 };
 
 sa.openid = {
-  getRequest: function (callback) {
+  getRequest: function(callback) {
     wx.login({
-      success: function (res) {
+      success: function(res) {
         if (res.code && sa.para.appid && sa.para.openid_url) {
           _.wxrequest({
             url: sa.para.openid_url + '&code=' + res.code + '&appid=' + sa.para.appid,
             method: 'GET',
-            complete: function (res2) {
+            complete: function(res2) {
               if (_.isObject(res2) && _.isObject(res2.data) && res2.data.openid) {
                 callback(res2.data.openid);
               } else {
@@ -1028,13 +1393,13 @@ sa.openid = {
       }
     });
   },
-  getWXStorage: function () {
+  getWXStorage: function() {
     var storageInfo = sa.store.getStorage();
     if (storageInfo && _.isObject(storageInfo)) {
       return storageInfo.openid;
     }
   },
-  getOpenid: function (callback) {
+  getOpenid: function(callback) {
     if (!sa.para.appid) {
       callback();
       return false;
@@ -1048,27 +1413,38 @@ sa.openid = {
   }
 };
 
-sa.initial = function () {
+sa.initial = function() {
   this._.info.getSystem();
   this.store.init();
 };
 
-sa.init = function (obj) {
+sa.init = function(obj) {
   if (this.hasInit === true) {
     return false;
   }
   this.hasInit = true;
   sa.setPara(obj);
+  if (sa.para.batch_send) {
+    wx.getStorage({
+      key: 'sensors_mp_prepare_data',
+      complete: function(res) {
+        var queue = res.data && _.isArray(res.data) ? res.data : [];
+        sa.store.mem.mdata = queue.concat(sa.store.mem.mdata);
+        sa.sendStrategy.syncStorage = true;
+      }
+    });
+    sa.sendStrategy.batchInterval();
+  }
   sa.initialState.storeIsComplete = true;
   sa.initialState.checkIsComplete();
 };
 
-sa.getPresetProperties = function () {
+sa.getPresetProperties = function() {
   if (_.info && _.info.properties && _.info.properties.$lib) {
     var builtinProps = {};
-    _.each(_.info.currentProps, function (value, key) {
+    _.each(_.info.currentProps, function(value, key) {
       if (key.indexOf('$') === 0) {
-        builtinProps[ key ] = value;
+        builtinProps[key] = value;
       }
     });
     var obj = _.extend(builtinProps, {
@@ -1081,68 +1457,108 @@ sa.getPresetProperties = function () {
   }
 };
 
-sa.requestQueue = function (para) {
-  this.url = para.url;
-  this.start()
+_.autoExeQueue = function() {
+  var queue = {
+    items: [],
+    enqueue: function(val) {
+      this.items.push(val);
+      this.start();
+    },
+    dequeue: function() {
+      return this.items.shift();
+    },
+    getCurrentItem: function() {
+      return this.items[0];
+    },
+    isRun: false,
+    start: function() {
+      if (this.items.length > 0 && !this.isRun) {
+        this.isRun = true;
+        this.getCurrentItem().start();
+      }
+    },
+    close: function() {
+      this.dequeue();
+      this.isRun = false;
+      this.start();
+    }
+  };
+  return queue;
 };
-sa.requestQueue.prototype.isEnd = function () {
+
+sa.requestQueue = function(para) {
+  this.url = para.url;
+};
+sa.requestQueue.prototype.isEnd = function() {
   if (!this.received) {
     this.received = true;
     this.close();
   }
 };
-sa.requestQueue.prototype.start = function () {
+sa.requestQueue.prototype.start = function() {
   var me = this;
-  setTimeout(function () {
+  setTimeout(function() {
     me.isEnd();
   }, sa.para.send_timeout);
   _.wxrequest({
     url: this.url,
     method: 'GET',
-    complete: function () {
+    complete: function() {
       me.isEnd();
     }
   });
-
-  // todo
-  var image = new Image()
-  image.onload = function() {}
-  image.onerror = function() {}
-  image.width = 0
-  image.height = 0
-
-  image.src =  this.url
 };
+
+sa.dataQueue = _.autoExeQueue();
 
 sa.sendStrategy = {
   dataHasSend: true,
   dataHasChange: false,
   syncStorage: false,
   failTime: 0,
-  onAppHide: function () {},
-  send: function (data) {
+  onAppHide: function() {
+    if (sa.para.batch_send) {
+      this.batchSend();
+    }
+  },
+  send: function(data) {
     if (!sa.para.server_url) {
       return false;
     }
-    this.queueSend(data);
+    if (sa.para.batch_send) {
+      this.dataHasChange = true;
+      if (sa.store.mem.getLength() >= 300) {
+        logger.info('数据量存储过大，有异常');
+        return false;
+      }
+      sa.store.mem.add(data);
+      if (sa.store.mem.getLength() >= sa.para.batch_send.max_length) {
+        this.batchSend();
+      }
+    } else {
+      this.queueSend(data);
+    }
   },
-  queueSend: function (url) {
+  queueSend: function(url) {
     url = JSON.stringify(url);
     if (sa.para.server_url.indexOf('?') !== -1) {
-      // todo
-      // url = sa.para.server_url + '&data=' + encodeURIComponent(_.base64Encode(url));
+      url = sa.para.server_url + '&data=' + encodeURIComponent(_.base64Encode(url));
     } else {
-      // url = sa.para.server_url + '?data=' + encodeURIComponent(_.base64Encode(url));
+      url = sa.para.server_url + '?data=' + encodeURIComponent(_.base64Encode(url));
     }
 
-    new sa.requestQueue({
+    var instance = new sa.requestQueue({
       url: url
     });
+    instance.close = function() {
+      sa.dataQueue.close();
+    };
+    sa.dataQueue.enqueue(instance);
   },
-  wxrequest: function (option) {
+  wxrequest: function(option) {
     if (_.isArray(option.data) && option.data.length > 0) {
       var now = Date.now();
-      option.data.forEach(function (v) {
+      option.data.forEach(function(v) {
         v._flush_time = now;
       });
       option.data = JSON.stringify(option.data);
@@ -1150,11 +1566,11 @@ sa.sendStrategy = {
         url: sa.para.server_url,
         method: 'POST',
         dataType: 'text',
-        // data: 'data_list=' + encodeURIComponent(_.base64Encode(option.data)),  // todo
-        success: function () {
+        data: 'data_list=' + encodeURIComponent(_.base64Encode(option.data)),
+        success: function() {
           option.success(option.len);
         },
-        fail: function () {
+        fail: function() {
           option.fail();
         }
       });
@@ -1162,13 +1578,72 @@ sa.sendStrategy = {
       option.success(option.len);
     }
   },
-  sendFail: function () {
+  batchSend: function() {
+    if (this.dataHasSend) {
+      var data = sa.store.mem.mdata;
+      var len = data.length;
+      if (len > 0) {
+        this.dataHasSend = false;
+        this.wxrequest({
+          data: data,
+          len: len,
+          success: this.batchRemove.bind(this),
+          fail: this.sendFail.bind(this)
+        });
+      }
+    }
+  },
+  sendFail: function() {
     this.dataHasSend = true;
     this.failTime++;
   },
+  batchRemove: function(len) {
+    sa.store.mem.clear(len);
+    this.dataHasSend = true;
+    this.dataHasChange = true;
+    this.batchWrite();
+    this.failTime = 0;
+  },
+  is_first_batch_write: true,
+  batchWrite: function() {
+    var me = this;
+    if (this.dataHasChange) {
+      if (this.is_first_batch_write) {
+        this.is_first_batch_write = false;
+        setTimeout(function() {
+          me.batchSend();
+        }, 1000);
+      }
+
+      this.dataHasChange = false;
+      if (this.syncStorage) {
+        sa._.setStorageSync('sensors_mp_prepare_data', sa.store.mem.mdata);
+      }
+    }
+  },
+  batchInterval: function() {
+
+    var _this = this;
+
+    function loopWrite() {
+      setTimeout(function() {
+        _this.batchWrite();
+        loopWrite();
+      }, 500);
+    }
+
+    function loopSend() {
+      setTimeout(function() {
+        _this.batchSend();
+        loopSend();
+      }, sa.para.batch_send.send_timeout * Math.pow(2, _this.failTime));
+    }
+    loopWrite();
+    loopSend();
+  }
 };
 
-sa.setOpenid = function (openid, isCover) {
+sa.setOpenid = function(openid, isCover) {
   sa.store.set('openid', openid);
   if (isCover) {
     sa.store.set('distinct_id', openid);
@@ -1177,12 +1652,12 @@ sa.setOpenid = function (openid, isCover) {
   }
 };
 
-sa.initWithOpenid = function (options, callback) {
+sa.initWithOpenid = function(options, callback) {
   options = options || {};
   if (options.appid) {
     sa.para.appid = options.appid;
   }
-  sa.openid.getOpenid(function (openid) {
+  sa.openid.getOpenid(function(openid) {
     if (openid) {
       sa.setOpenid(openid, options.isCoverLogin);
     }
@@ -1193,9 +1668,9 @@ sa.initWithOpenid = function (options, callback) {
   });
 };
 
-_.each(['setProfile', 'setOnceProfile', 'track', 'quick', 'incrementProfile', 'appendProfile', 'login', 'logout'], function (method) {
-  var temp = sa[ method ];
-  sa[ method ] = function () {
+_.each(['setProfile', 'setOnceProfile', 'track', 'quick', 'incrementProfile', 'appendProfile', 'login', 'logout'], function(method) {
+  var temp = sa[method];
+  sa[method] = function() {
     if (sa.initialState.isComplete) {
       temp.apply(sa, arguments);
     } else {
@@ -1204,11 +1679,11 @@ _.each(['setProfile', 'setOnceProfile', 'track', 'quick', 'incrementProfile', 'a
   };
 });
 
-_.setQuery = function (params, isEncode) {
+_.setQuery = function(params, isEncode) {
   var url_query = '';
   if (params && _.isObject(params) && !_.isEmptyObject(params)) {
     var arr = [];
-    _.each(params, function (value, key) {
+    _.each(params, function(value, key) {
       if (!(key === 'q' && _.isString(value) && value.indexOf('http') === 0) && key !== 'scene') {
         if (isEncode) {
           arr.push(key + '=' + value);
@@ -1223,59 +1698,73 @@ _.setQuery = function (params, isEncode) {
   }
 };
 
-function mp_proxy (option, method, identifier) {
-  var newFunc = sa.autoTrackCustom[ identifier ];
-  if (option[ method ]) {
-    var oldFunc = option[ method ];
-    option[ method ] = function () {
+_.getUtmFromPage = function() {
+  var newObj = {};
+  try {
+    var allpages = getCurrentPages();
+    var myvar = allpages[allpages.length - 1].options;
+    newObj = _.getCustomUtmFromQuery(myvar, '$', '_', '$');
+  } catch (e) {
+    logger.info(e);
+  }
+  return newObj;
+};
+
+
+function mp_proxy(option, method, identifier) {
+  var newFunc = sa.autoTrackCustom[identifier];
+  if (option[method]) {
+    var oldFunc = option[method];
+    option[method] = function() {
       if (method === 'onLaunch') {
-        this[ sa.para.name ] = sa;
+        this[sa.para.name] = sa;
       }
-      if (!sa.para.autoTrackIsFirst || (_.isObject(sa.para.autoTrackIsFirst) && !sa.para.autoTrackIsFirst[ identifier ])) {
+      if (!sa.para.autoTrackIsFirst || (_.isObject(sa.para.autoTrackIsFirst) && !sa.para.autoTrackIsFirst[identifier])) {
         oldFunc.apply(this, arguments);
         newFunc.apply(this, arguments);
-      } else if (sa.para.autoTrackIsFirst === true || (_.isObject(sa.para.autoTrackIsFirst) && sa.para.autoTrackIsFirst[ identifier ])) {
+      } else if (sa.para.autoTrackIsFirst === true || (_.isObject(sa.para.autoTrackIsFirst) && sa.para.autoTrackIsFirst[identifier])) {
         newFunc.apply(this, arguments);
         oldFunc.apply(this, arguments);
       }
     };
   } else {
-    option[ method ] = function () {
+    option[method] = function() {
       if (method === 'onLaunch') {
-        this[ sa.para.name ] = sa;
+        this[sa.para.name] = sa;
       }
       newFunc.apply(this, arguments);
     };
   }
 }
 
-function click_proxy (option, method) {
-  var oldFunc = option[ method ];
+function click_proxy(option, method) {
+  var oldFunc = option[method];
 
-  option[ method ] = function () {
+  option[method] = function() {
     var prop = {},
       type = '';
 
-    if (_.isObject(arguments[ 0 ])) {
-      var target = arguments[ 0 ].currentTarget || {};
+    if (_.isObject(arguments[0])) {
+      var target = arguments[0].currentTarget || {};
       var dataset = target.dataset || {};
-      type = arguments[ 0 ][ 'type' ];
-      prop[ '$element_id' ] = target.id;
-      prop[ '$element_type' ] = dataset[ 'type' ];
-      prop[ '$element_content' ] = dataset[ 'content' ];
-      prop[ '$element_name' ] = dataset[ 'name' ];
+      type = arguments[0]['type'];
+      prop['$element_id'] = target.id;
+      prop['$element_type'] = dataset['type'];
+      prop['$element_content'] = dataset['content'];
+      prop['$element_name'] = dataset['name'];
     }
     if (type && _.isClick(type)) {
-      prop[ '$url_path' ] = _.getCurrentPath();
+      prop['$url_path'] = _.getCurrentPath();
       sa.track('$MPClick', prop);
     }
     return oldFunc && oldFunc.apply(this, arguments);
   }
 };
 
+
 sa.autoTrackCustom = {
-  trackCustom: function (api, prop, event) {
-    var temp = sa.para.autoTrack[ api ];
+  trackCustom: function(api, prop, event) {
+    var temp = sa.para.autoTrack[api];
     var tempFunc = '';
     if (sa.para.autoTrack && temp) {
       if (typeof temp === 'function') {
@@ -1285,26 +1774,34 @@ sa.autoTrackCustom = {
         }
       } else if (_.isObject(temp)) {
         _.extend(prop, temp);
-        sa.para.autoTrack[ api ] = true;
+        sa.para.autoTrack[api] = true;
       }
       sa.track(event, prop);
     }
   },
-  appLaunch: function (para, not_use_auto_track) {
+  appLaunch: function(para, not_use_auto_track) {
 
-    if (typeof this === 'object' && !this[ 'trackCustom' ]) {
-      this[ sa.para.name ] = sa;
+    if (typeof this === 'object' && !this['trackCustom']) {
+      this[sa.para.name] = sa;
     }
+
 
     var prop = {};
     if (para && para.path) {
       prop.$url_path = _.getPath(para.path);
     }
+    _.setShareInfo(para, prop);
+    var utms = _.setUtm(para, prop);
     if (is_first_launch) {
       prop.$is_first_time = true;
+      if (!_.isEmptyObject(utms.pre1)) {
+        sa.setOnceProfile(utms.pre1);
+      }
     } else {
       prop.$is_first_time = false;
     }
+
+    _.setLatestChannel(utms.pre2);
 
     prop.$scene = _.getMPScene(para.scene);
     sa.registerApp({
@@ -1321,7 +1818,7 @@ sa.autoTrackCustom = {
       sa.autoTrackCustom.trackCustom('appLaunch', prop, '$MPLaunch');
     }
   },
-  appShow: function (para, not_use_auto_track) {
+  appShow: function(para, not_use_auto_track) {
     var prop = {};
 
     mpshow_time = (new Date()).getTime();
@@ -1329,6 +1826,11 @@ sa.autoTrackCustom = {
     if (para && para.path) {
       prop.$url_path = _.getPath(para.path);
     }
+    _.setShareInfo(para, prop);
+
+    var utms = _.setUtm(para, prop);
+
+    _.setLatestChannel(utms.pre2);
 
     prop.$scene = _.getMPScene(para.scene);
     sa.registerApp({
@@ -1343,7 +1845,7 @@ sa.autoTrackCustom = {
       sa.autoTrackCustom.trackCustom('appShow', prop, '$MPShow');
     }
   },
-  appHide: function (not_use_auto_track) {
+  appHide: function(not_use_auto_track) {
     var current_time = (new Date()).getTime();
     var prop = {};
     prop.$url_path = _.getCurrentPath();
@@ -1358,19 +1860,20 @@ sa.autoTrackCustom = {
     }
     sa.sendStrategy.onAppHide();
   },
-  pageLoad: function (para) {
+  pageLoad: function(para) {
     if (para && _.isObject(para)) {
       this.sensors_mp_url_query = _.setQuery(para);
       this.sensors_mp_encode_url_query = _.setQuery(para, true);
     }
   },
-  pageShow: function () {
+  pageShow: function() {
     var prop = {};
     var router = _.getCurrentPath();
     prop.$referrer = sa_referrer;
     prop.$url_path = router;
     sa.status.last_referrer = sa_referrer;
     prop.$url_query = this.sensors_mp_url_query ? this.sensors_mp_url_query : '';
+    prop = _.extend(prop, _.getUtmFromPage());
 
     if (sa.para.onshow) {
       sa.para.onshow(sa, router, this);
@@ -1380,17 +1883,18 @@ sa.autoTrackCustom = {
     sa_referrer = router;
     sa.status.referrer = router;
   },
-  pageShare: function (option, not_use_auto_track) {
+  pageShare: function(option, not_use_auto_track) {
 
     var oldMessage = option.onShareAppMessage;
 
-    option.onShareAppMessage = function () {
+    option.onShareAppMessage = function() {
 
       var oldValue = oldMessage.apply(this, arguments);
 
       if (sa.para.autoTrack && sa.para.autoTrack.pageShare) {
         sa.autoTrackCustom.trackCustom('pageShare', {
           $url_path: _.getCurrentPath(),
+          $share_depth: query_share_depth
         }, '$MPShare');
       }
 
@@ -1412,8 +1916,7 @@ sa.autoTrackCustom = {
           }
         }
 
-        // todo
-        // oldValue.path = oldValue.path + 'sampshare=' + encodeURIComponent(_.getShareInfo());
+        oldValue.path = oldValue.path + 'sampshare=' + encodeURIComponent(_.getShareInfo());
       }
       return oldValue;
     }
@@ -1421,10 +1924,12 @@ sa.autoTrackCustom = {
 
 };
 
-sa.quick = function () {
-  var arg0 = arguments[ 0 ];
-  var arg1 = arguments[ 1 ];
-  var arg2 = arguments[ 2 ];
+
+
+sa.quick = function() {
+  var arg0 = arguments[0];
+  var arg1 = arguments[1];
+  var arg2 = arguments[2];
 
   var prop = _.isObject(arg2) ? arg2 : {};
   if (arg0 === 'getAnonymousID') {
@@ -1435,18 +1940,24 @@ sa.quick = function () {
     }
   } else if (arg0 === 'appLaunch' || arg0 === 'appShow') {
     if (arg1) {
-      sa.autoTrackCustom[ arg0 ](arg1, prop);
+      sa.autoTrackCustom[arg0](arg1, prop);
     } else {
       logger.info('App的launch和show，在sensors.quick第二个参数必须传入App的options参数');
     }
   } else if (arg0 === 'appHide') {
     prop = _.isObject(arg1) ? arg1 : {};
-    sa.autoTrackCustom[ arg0 ](prop);
+    sa.autoTrackCustom[arg0](prop);
   }
 };
 
+
+
+
+
+
+
 var oldApp = App;
-App = function (option) {
+App = function(option) {
   mp_proxy(option, "onLaunch", 'appLaunch');
   mp_proxy(option, "onShow", 'appShow');
   mp_proxy(option, "onHide", 'appHide');
@@ -1454,12 +1965,12 @@ App = function (option) {
 };
 
 var oldPage = Page;
-Page = function (option) {
+Page = function(option) {
   var methods = sa.para.autoTrack && sa.para.autoTrack.mpClick && _.getMethods(option);
 
   if (!!methods) {
     for (var i = 0, len = methods.length; i < len; i++) {
-      click_proxy(option, methods[ i ]);
+      click_proxy(option, methods[i]);
     }
   }
 
@@ -1472,13 +1983,13 @@ Page = function (option) {
 };
 
 var oldComponent = Component;
-Component = function (option) {
+Component = function(option) {
   try {
     var methods = sa.para.autoTrack && sa.para.autoTrack.mpClick && _.getMethods(option.methods);
 
     if (!!methods) {
       for (var i = 0, len = methods.length; i < len; i++) {
-        click_proxy(option.methods, methods[ i ]);
+        click_proxy(option.methods, methods[i]);
       }
     }
 
@@ -1493,6 +2004,10 @@ Component = function (option) {
   }
 };
 
+
+
+
 sa.initial();
+
 
 module.exports = sa;
